@@ -29,7 +29,7 @@ jobs:
           [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD\overlay\overlay.ps1", [ref]$null, [ref]$errors)
           if ($errors) { $errors | ForEach-Object { $_.ToString() }; exit 1 }
       - if: runner.os == 'Linux'
-        run: npm pack --pack-destination dist
+        run: mkdir -p dist && npm pack --pack-destination dist
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
         with:
