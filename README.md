@@ -110,7 +110,7 @@ dsh plugin --profile <整合包 ID> add https://github.com/win10ogod/dsh-live-si
 
 ## 限制
 
-- 懸浮窗只支援 Windows。macOS 需要「螢幕錄製」權限；Linux 只支援 Wayland（第一次會由系統詢問要分享哪個畫面）。
+- 懸浮窗只支援 Windows。macOS 需要「螢幕錄製」權限；Linux 只支援 Wayland（第一次會由系統詢問要分享哪個畫面），而且需要 PipeWire 的函式庫 `libpipewire-0.3`（一般桌面已經有）。
 - 遊戲用「獨佔全螢幕」時，任何懸浮窗都蓋不上去；請改用「無邊框視窗」或視窗模式。
 - 不聽聲音、不念出回覆。
 - 看得到的是取樣下來的畫面，不是連續影片；非常短暫的畫面可能被略過。

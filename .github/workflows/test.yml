@@ -6,6 +6,7 @@ on:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -14,6 +15,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      # The Linux build of @screen-capture/node links libpipewire (the Wayland ScreenCast portal); the JPEG
+      # encoder used by the tests lives in the same binary.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && (sudo apt-get install -y libpipewire-0.3-0t64 || sudo apt-get install -y libpipewire-0.3-0)
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm test
       - name: Overlay script parses (Windows PowerShell 5.1)
