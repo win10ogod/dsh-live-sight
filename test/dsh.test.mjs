@@ -24,21 +24,29 @@ function solid(width, height, [b, g, r]) {
   return { buffer, width, height }
 }
 
-async function fixture(t, { modalities } = {}) {
+async function fixture(t, { modalities, efforts, config = {} } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'live-sight-'))
   const ctx = new Context()
   for (const plugin of [Sessions, Projections, Agents, Llm, Prompt, Tools, NativeToolExecutor, Commands]) await ctx.plugin(plugin)
   await ctx.plugin(AttachmentLocal, { dshHome: home })
   await ctx.plugin(Loop, {})
   const requests = []
-  const reply = { text: '我看到了。' }
+  const reply = { text: '我看到了。', hold: null }
   const adapter = new (class extends LlmAdapter {
-    async resolveModel(provider, model) { return { provider, id: model, name: model, ...(modalities ? { inputModalities: modalities } : {}) } }
+    async resolveModel(provider, model) { return { provider, id: model, name: model, ...(modalities ? { inputModalities: modalities } : {}), ...(efforts ? { reasoning: { efforts: efforts.map(id => ({ id, name: id })) } } : {}) } }
     async *stream(request) {
       requests.push(request)
       if (reply.call && !request.messages.some(m => m.role === 'tool')) {
         yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'call-1', name: 'sight', arguments: JSON.stringify(reply.call) } }
-      } else yield { type: 'block-end', index: 0, block: { type: 'text', text: reply.text } }
+      } else {
+        // Streamed like a real provider: the text arrives in pieces before the block ends.
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        const half = Math.ceil(reply.text.length / 2)
+        yield { type: 'text-delta', index: 0, text: reply.text.slice(0, half) }
+        if (reply.hold) await reply.hold(request.signal)
+        yield { type: 'text-delta', index: 0, text: reply.text.slice(half) }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: reply.text } }
+      }
       yield { type: 'finish', reason: { kind: 'stop' } }
     }
   })()
@@ -48,6 +56,8 @@ async function fixture(t, { modalities } = {}) {
   const overlayEvents = []
   const overlays = []
   const sleeps = []
+  const events = []
+  ctx.on('session/event', (_session, event) => events.push(event))
   const source = {
     target: { kind: 'window', title: 'Game' },
     geometry: { window: 'Game', left: 100, top: 50, width: 960, height: 540 },
@@ -64,7 +74,7 @@ async function fixture(t, { modalities } = {}) {
     sleep: async ms => { sleeps.push(ms) },
   }
   // cordis reserves the third argument of ctx.plugin; hand the doubles over through apply.
-  await ctx.plugin({ name: sight.name, inject: sight.inject, apply: (c, config) => sight.apply(c, config, deps) }, { overlayTitle: '測試', minGapMs: 0, settleMs: 0, fps: 20 })
+  await ctx.plugin({ name: sight.name, inject: sight.inject, apply: (c, config) => sight.apply(c, config, deps) }, { overlayTitle: '測試', minGapMs: 0, settleMs: 0, fps: 20, ...config })
   const handle = await ctx.agents.create({ sessionId: randomUUID(), agentOptions: { provider: 'fixture', model: 'fixture-model', maxTokens: 4096 } })
   t.after(async () => {
     await handle.dispose()
@@ -73,7 +83,7 @@ async function fixture(t, { modalities } = {}) {
   })
   const change = (frame, ms) => { clock += ms; screen.frame = frame; screen.seq++; screen.at = clock }
   const run = async text => (await ctx.commands.execute(handle.agent, text, [], new AbortController().signal)).result
-  return { ctx, agent: handle.agent, requests, reply, overlayEvents, overlays, sleeps, run, change, tick: ms => { clock += ms } }
+  return { ctx, agent: handle.agent, source, requests, reply, overlayEvents, overlays, sleeps, events, run, change, tick: ms => { clock += ms } }
 }
 
 const textOf = content => (Array.isArray(content) ? content.filter(b => b.type === 'text').map(b => b.text).join('\n') : String(content ?? ''))
@@ -158,5 +168,62 @@ test('/sight pause and resume say so when there is nothing to pause or resume', 
   assert.equal((await f.run('/sight resume')).kind, 'error', 'already watching')
   assert.equal((await f.run('/sight pause')).kind, 'success')
   assert.equal((await f.run('/sight resume')).kind, 'success')
+  await f.run('/sight off')
+})
+
+test('a screen-only turn gives way when the user types; their words are answered next, the reply streams to the overlay', async t => {
+  const f = await fixture(t)
+  // The first (screen) turn stalls halfway through its reply until it is cancelled.
+  f.reply.text = '紅龍出現了，好大'
+  f.reply.hold = signal => new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason)
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+  })
+  assert.equal((await f.run('/sight window Game')).kind, 'success')
+  await new Promise(r => setTimeout(r, 120))
+  f.change(solid(960, 540, [20, 200, 40]), 1000)
+  assert.ok(await waitFor(() => f.requests.length === 1 && f.agent.status === 'running'), 'the screen turn is running')
+  assert.ok(await waitFor(() => f.overlayEvents.some(e => e.type === 'stream' && e.text === '紅龍出現')), 'its first half streamed: ' + JSON.stringify(f.overlayEvents))
+  f.reply.hold = null
+  f.reply.text = '在左邊喔。'
+  f.agent.followup(createUserMessage({ content: [{ type: 'text', text: '牠在哪？' }], source: { kind: 'user' } }))
+  await waitFor(() => f.requests.length >= 2)
+  await f.agent.whenIdle()
+  assert.equal(f.requests.length, 2, 'no second screen turn was needed before answering')
+  assert.deepEqual(f.events.filter(e => e.type === 'turn/end').map(e => e.data.reason.kind), ['aborted', 'completed'])
+  const asked = f.requests[1].messages.filter(m => m.role === 'user').map(m => textOf(m.content)).join('\n')
+  assert.match(asked, /牠在哪/)
+  assert.ok(await waitFor(() => f.overlayEvents.some(e => e.type === 'say' && e.text === '在左邊喔。')))
+  assert.ok(f.overlayEvents.some(e => e.type === 'say' && e.text === '紅龍出現…'), 'the cut reply is kept and marked: ' + JSON.stringify(f.overlayEvents.filter(e => e.type === 'say')))
+  assert.match((await f.run('/sight status')).text, /"preempted":1/)
+  await f.run('/sight off')
+})
+
+test('watchEffort lowers the reasoning effort while watching and gives it back when watching stops', async t => {
+  const f = await fixture(t, { efforts: ['low', 'medium', 'xhigh'], config: { watchEffort: 'low' } })
+  f.agent.model.select({ provider: 'fixture', model: 'fixture-model', reasoningEffort: 'xhigh' })
+  await f.run('/sight window Game')
+  assert.equal(f.agent.model.current().reasoningEffort, 'low')
+  assert.match((await f.run('/sight status')).text, /"effort":"low","restoresTo":"xhigh"/)
+  await f.run('/sight off')
+  assert.equal(f.agent.model.current().reasoningEffort, 'xhigh')
+  // Someone picks another effort while watching: it is theirs, nothing is put back over it.
+  await f.run('/sight window Game')
+  f.agent.model.select({ provider: 'fixture', model: 'fixture-model', reasoningEffort: 'medium' })
+  await f.run('/sight off')
+  assert.equal(f.agent.model.current().reasoningEffort, 'medium')
+  // The watched window closes by itself: the effort comes back too.
+  f.agent.model.select({ provider: 'fixture', model: 'fixture-model', reasoningEffort: 'xhigh' })
+  await f.run('/sight window Game')
+  f.source.ended = 'capture closed'
+  assert.ok(await waitFor(() => f.agent.model.current().reasoningEffort === 'xhigh'), 'restored after the source ended')
+  f.source.ended = null
+})
+
+test('watchEffort that the model does not offer leaves the effort alone', async t => {
+  const f = await fixture(t, { efforts: ['high'], config: { watchEffort: 'low' } })
+  f.agent.model.select({ provider: 'fixture', model: 'fixture-model', reasoningEffort: 'high' })
+  await f.run('/sight window Game')
+  assert.equal(f.agent.model.current().reasoningEffort, 'high')
   await f.run('/sight off')
 })

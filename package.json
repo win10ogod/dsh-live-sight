@@ -1,6 +1,6 @@
 {
   "name": "dsh-live-sight",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Watch the screen together with your DSH agent: change-gated frames packed into sheets for vision models, and a desktop overlay for the conversation",
   "type": "module",
   "main": "lib/index.js",

@@ -1,6 +1,7 @@
 ﻿# Live Sight overlay: an always-on-top card that shows the conversation while the agent watches.
 # Talks to the plugin through JSON lines: commands arrive on stdin, user actions leave on stdout.
-#   in : {type:"state",status,detail} {type:"say",role,text} {type:"busy",value} {type:"close"}
+#   in : {type:"state",status,detail} {type:"say",role,text,id?} {type:"stream",id,text} {type:"busy",value} {type:"close"}
+#        a reply being written arrives as "stream" frames and is settled by "say" with the same id
 #   out: {type:"ready"} {type:"send",text} {type:"pause"} {type:"resume"} {type:"stop"} {type:"closed"}
 param(
   [string]$StatePath = '',
@@ -227,6 +228,28 @@ function Add-Message([string]$role, [string]$text) {
   while ($ui.Messages.Children.Count -gt 60) { $ui.Messages.Children.RemoveAt(0) }
   $ui.Scroll.ScrollToEnd()
   if ($state.collapsed -and $role -eq 'assistant') { $ui.Detail.Text = Plain $text }
+  $bubble
+}
+
+# Replies still being written, by id: the same bubble grows until the final text settles it.
+$replies = @{}
+function Show-Reply([string]$id, [string]$text, [bool]$final) {
+  if ($id -and $replies.ContainsKey($id)) {
+    $bubble = $replies[$id]
+    if ($text) {
+      $bubble.Child.Inlines.Clear()
+      Set-RichText $bubble.Child $text
+      $script:lastAssistant = $text
+      if ($state.collapsed) { $ui.Detail.Text = Plain $text }
+      $ui.Scroll.ScrollToEnd()
+    } else {
+      $ui.Messages.Children.Remove($bubble)
+    }
+  } elseif ($text) {
+    $bubble = Add-Message 'assistant' $text
+    if ($id -and -not $final) { $replies[$id] = $bubble }
+  }
+  if ($final -and $id) { $replies.Remove($id) }
 }
 
 function Set-Status([string]$status, [string]$detail) {
@@ -310,7 +333,8 @@ $timer.Add_Tick({
     try { $command = $line | ConvertFrom-Json } catch { continue }
     switch ($command.type) {
       'state' { Set-Status $command.status $command.detail }
-      'say'   { Add-Message $command.role $command.text }
+      'say'   { if ($command.role -eq 'assistant') { Show-Reply ([string]$command.id) ([string]$command.text) $true } else { [void](Add-Message $command.role $command.text) } }
+      'stream' { Show-Reply ([string]$command.id) ([string]$command.text) $false }
       'busy'  { $state.busy = [bool]$command.value; Update-Thinking }
       'close' { $timer.Stop(); $window.Close() }
     }

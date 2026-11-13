@@ -105,13 +105,13 @@ test('words typed in the overlay go in as the user, with the screen as it is now
 test('the overlay mirrors the conversation: replies, the user\'s words, and when the agent is thinking', () => {
   const h = harness()
   h.companion.onSessionEvent({ type: 'turn/start', data: { turn: 1 } })
-  h.companion.onSessionEvent({ type: 'assistant/message', data: { message: { content: [{ type: 'reasoning', text: 'hidden' }, { type: 'text', text: '好帥！' }] } } })
+  h.companion.onSessionEvent({ type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [{ type: 'reasoning', text: 'hidden' }, { type: 'text', text: '好帥！' }] } } })
   h.companion.onSessionEvent({ type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '看我的' }] } })
   h.companion.onSessionEvent({ type: 'user/message', data: { source: { kind: SOURCE_KIND }, content: [{ type: 'text', text: '（這是即時畫面）' }] } })
   h.companion.onSessionEvent({ type: 'turn/end', data: { turn: 1 } })
   assert.deepEqual(h.events, [
     { type: 'busy', value: true },
-    { type: 'say', role: 'assistant', text: '好帥！' },
+    { type: 'say', role: 'assistant', id: '1.1', text: '好帥！' },
     { type: 'say', role: 'user', text: '看我的' },
     { type: 'busy', value: false },
   ])
@@ -201,4 +201,65 @@ test('with maxFrames 1 a sheet that ends on the screen now has one tile', async 
   await h.settle()
   const m = h.followups.at(-1)
   assert.match(m.content[1].attachment.ref, /^jpeg:448x252$/)
+})
+
+test('a reply appears in the overlay while it is written, and the final text settles the same bubble', async () => {
+  const h = harness({ options: { streamIntervalMs: 5 } })
+  const chunk = text => ({ type: 'chunk', attemptId: 'a1', revision: 1, index: 0, time: 0, chunk: { type: 'text-delta', index: 0, text } })
+  h.companion.onStream({ type: 'start', attemptId: 'a1', revision: 1, turn: 3, step: 2 })
+  h.companion.onStream({ type: 'chunk', attemptId: 'a1', revision: 1, index: 0, time: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'hidden' } })
+  h.companion.onStream(chunk('紅龍'))
+  h.companion.onStream(chunk('來了'))
+  await new Promise(r => setTimeout(r, 20))
+  h.companion.onStream(chunk('！'))
+  h.companion.onSessionEvent({ type: 'assistant/message', data: { turn: 3, step: 2, message: { content: [{ type: 'text', text: '紅龍來了！' }] } } })
+  await new Promise(r => setTimeout(r, 20))
+  assert.deepEqual(h.events, [
+    { type: 'stream', id: '3.2', text: '紅龍來了' },
+    { type: 'say', role: 'assistant', id: '3.2', text: '紅龍來了！' },
+  ], 'reasoning never shows; no stream frame after the final text')
+})
+
+test('the other party speaking stops a turn that only looks at the screen, never one that answers them', async () => {
+  const calls = []
+  const h = harness({ status: 'running' })
+  h.agent.cancel = (cause, options) => calls.push(['cancel', cause, options])
+  h.agent.inbox = { remove: id => { calls.push(['remove', id]); return true } }
+  const words = { id: 'm1', source: { kind: 'user' }, content: [{ type: 'text', text: '你看這裡' }] }
+  h.companion.onSessionEvent({ type: 'turn/start', data: { turn: 1 } })
+  h.companion.onSessionEvent({ type: 'user/message', data: { source: { kind: SOURCE_KIND }, content: [] } })
+  assert.equal(h.companion.onInboxInserted({ source: { kind: 'live-sight' } }), false, 'a sheet does not preempt')
+  assert.equal(h.companion.onInboxInserted(words), true)
+  assert.equal(h.companion.onInboxInserted(words), false, 'sending the words again does not cancel twice')
+  await Promise.resolve()
+  assert.deepEqual(calls, [['remove', 'm1'], ['cancel', { kind: 'user' }, { keepInbox: true }]])
+  assert.deepEqual(h.followups.at(-1), { content: words.content, kind: 'user' }, 'their words are sent again after the cancel')
+  h.companion.onSessionEvent({ type: 'turn/end', data: { turn: 1 } })
+  h.companion.onSessionEvent({ type: 'turn/start', data: { turn: 2 } })
+  h.companion.onSessionEvent({ type: 'user/message', data: words })
+  assert.equal(h.companion.onInboxInserted(words), false, 'a turn answering them is not cut short')
+  h.companion.onSessionEvent({ type: 'turn/start', data: { turn: 3 } })
+  h.companion.onSessionEvent({ type: 'user/message', data: { source: { kind: 'temir-thought' }, content: [] } })
+  assert.equal(h.companion.onInboxInserted(words), false, 'only screen-only turns give way')
+  assert.equal(h.companion.status().preempted, 1)
+})
+
+test('a reply that streamed but was never recorded is settled at the end of the turn', async () => {
+  const h = harness({ options: { streamIntervalMs: 1 } })
+  h.companion.onStream({ type: 'start', attemptId: 'a9', revision: 1, turn: 4, step: 1 })
+  h.companion.onStream({ type: 'chunk', attemptId: 'a9', revision: 1, index: 0, time: 0, chunk: { type: 'text-delta', index: 0, text: '牠的尾巴' } })
+  await new Promise(r => setTimeout(r, 10))
+  h.companion.onSessionEvent({ type: 'turn/end', data: { turn: 4 } })
+  assert.deepEqual(h.events, [
+    { type: 'stream', id: '4.1', text: '牠的尾巴' },
+    { type: 'say', role: 'assistant', id: '4.1', text: '牠的尾巴…' },
+    { type: 'busy', value: false },
+  ])
+  assert.equal(h.companion.streams.size, 0)
+})
+
+test('an interrupted reply keeps what was said and shows that it was cut', () => {
+  const h = harness()
+  h.companion.onSessionEvent({ type: 'assistant/message', data: { turn: 1, step: 1, interrupted: true, message: { content: [{ type: 'text', text: '紅龍好像' }] } } })
+  assert.deepEqual(h.events, [{ type: 'say', role: 'assistant', id: '1.1', text: '紅龍好像…' }])
 })
