@@ -1,0 +1,32 @@
+name: Test dsh-live-sight
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - name: Overlay script parses (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD\overlay\overlay.ps1", [ref]$null, [ref]$errors)
+          if ($errors) { $errors | ForEach-Object { $_.ToString() }; exit 1 }
+      - if: runner.os == 'Linux'
+        run: npm pack --pack-destination dist
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: dsh-live-sight-package
+          path: dist/*.tgz
