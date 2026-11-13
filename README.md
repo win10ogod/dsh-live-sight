@@ -21,9 +21,13 @@
 
 ## 安裝
 
+從 [Releases](https://github.com/win10ogod/dsh-live-sight/releases) 下載 `dsh-live-sight-0.1.0.tgz`，放在固定的位置（例如整合包的 `plugin-cache`），再安裝：
+
 ```powershell
-dsh plugin --profile <整合包 ID> add https://github.com/win10ogod/dsh-live-sight/releases/download/v0.1.0/dsh-live-sight-0.1.0.tgz
+dsh plugin --profile <整合包 ID> add -w file:C:/path/to/dsh-live-sight-0.1.0.tgz
 ```
+
+不要直接用 release 的下載網址安裝：GitHub 會轉到一個約一小時後失效的簽章網址，pnpm 把它記進 `package.json`，之後安裝別的插件時會下載失敗。
 
 重新啟動 DSH。需要 DSH 0.2.2-alpha.2 或 0.2.2-rc.1。懸浮窗目前只在 Windows 上有（Windows PowerShell 與 WPF，系統內建）；其他平台照常可以看螢幕，對話留在 DSH 裡。
 
